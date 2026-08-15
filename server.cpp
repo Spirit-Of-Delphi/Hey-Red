@@ -51,7 +51,7 @@ void worker_thread(){
         }
 
         // 2. Read data
-        char buffer[1024];
+        char buffer[4096];
         int bytes_received = recv(client_fd, buffer, sizeof(buffer), 0);
 
         if (bytes_received > 0){
@@ -164,7 +164,7 @@ int main(){
                 // New client
                 SOCKET client_fd = accept(server_fd, NULL, NULL);
                 if (client_fd != INVALID_SOCKET) {
-                    std::cout << "[INFO] New connection: " << client_fd << "\n";
+                    //std::cout << "[INFO] New connection: " << client_fd << "\n";
                     std::string msg = "Connected.\n";
                     send(client_fd, msg.c_str(), msg.length(), 0);
 

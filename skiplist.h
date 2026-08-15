@@ -1,3 +1,5 @@
+#pragma once
+
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -42,7 +44,10 @@ public:
     }
 
     double get_score(const std::string& member){
-        return dict[member];
+        auto it = dict.find(member);
+        if (it == dict.end()) return -1;
+
+        return it->second;
     }
 
     void insert(double score, const std::string& member){

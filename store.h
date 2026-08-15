@@ -1,3 +1,5 @@
+#pragma once
+
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -213,7 +215,7 @@ public:
                 if (!(ss >> key >> member >> score)) continue;
                 auto it = map.find(key);
                 if (it == map.end()){
-                    SkipList* new_skiplist;
+                    SkipList* new_skiplist = new SkipList();
                     new_skiplist->insert(score, member);
 
                     Node* neu = new Node(key, new_skiplist);
@@ -262,8 +264,8 @@ public:
                         else
                             ++it;
                     }
+                    aof_file.flush();
                 }
-                aof_file.flush();
             }
         });
     }
@@ -429,6 +431,7 @@ public:
         std::string fr = cur_list.front();
         cur_list.pop_front();
 
+        logToAOF("LPOP " + key);
         markRecentlyUsed(it->second);
 
         if (cur_list.empty()){
@@ -437,7 +440,6 @@ public:
             map.erase(it);
         }
 
-        logToAOF("LPOP " + key);
         return fr;
     }
 
@@ -678,7 +680,7 @@ public:
         std::unique_lock<std::shared_mutex> uniqueLock(lock);
 
         auto it = map.find(key);
-        if (it == map.end()) return;
+        if (it == map.end()) throw std::out_of_range("NULL");
 
         detach(it->second);
         delete it->second;

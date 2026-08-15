@@ -1,3 +1,5 @@
+#pragma once
+
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -81,6 +83,7 @@ std::string process_client_cmd(const std::vector<std::string>& args, MiniRedis& 
     db.increment_cmds_processed();
 
     std::string command = args[0];
+    std::transform(command.begin(), command.end(), command.begin(), ::toupper);
 
     try {
         if (command == "SET"){
@@ -174,7 +177,9 @@ std::string process_client_cmd(const std::vector<std::string>& args, MiniRedis& 
             // returns message to all subs
             // returns number of subs to pub
             for(SOCKET s: subs){
-                send(s, payload.c_str(), payload.length(), 0);
+                if (send(s, payload.c_str(), payload.length(), 0) == SOCKET_ERROR){
+                    continue;
+                }
             }
             return resp_int(subs.size());
         }
