@@ -69,7 +69,7 @@ private:
 
 public:
     MiniRedis(){
-        capacity = 1000; // magic number for now
+        capacity = 2000000; // magic number for now
         map.clear();
 
         head = new Node("","");
@@ -345,7 +345,7 @@ public:
         if (!std::holds_alternative<std::string>(it->second->value)){
             throw std::invalid_argument("WRONGTYPE operation against a key holding wrong type of value.");
         }
-            
+        
         if (std::chrono::steady_clock::now() > it->second->expiry){
             detach(it->second);
             delete it->second;
