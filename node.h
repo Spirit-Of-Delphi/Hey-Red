@@ -1,84 +1,39 @@
 #include <string>
 #include <unordered_map>
 #include <chrono>
+#include <variant>
+#include <unordered_set>
+#include <deque>
+#include "skiplist.h"
+
+using RedisValue = std::variant<std::string, std::deque<std::string>, std::unordered_set<std::string>, SkipList*>;
 
 struct Node{
     std::string key;
-    std::string value;
+    RedisValue value;
     std::chrono::steady_clock::time_point expiry;
     Node* prev;
     Node* next;
 
     Node(const std::string& k,
-        const std::string& v,
-        const std::chrono::steady_clock::time_point& exp = std::chrono::steady_clock::time_point::max()):
-            key(k), value(v), expiry(exp) ,prev(nullptr), next(nullptr){};
+        const RedisValue& v,
+        const std::chrono::steady_clock::time_point& exp = std::chrono::steady_clock::time_point::max())
+            :key(k), value(v), expiry(exp), prev(nullptr), next(nullptr){};
+
+    Node(const Node& copy)
+            : key(copy.key), expiry(copy.expiry), prev(nullptr), next(nullptr){
+
+        if (std::holds_alternative<SkipList*>(copy.value)){
+            value = new SkipList(*std::get<SkipList*>(copy.value));
+        }
+        else{
+            value = copy.value;
+        }
+    };
+
+    ~Node(){
+        if (std::holds_alternative<SkipList*>(value)){
+            delete std::get<SkipList*>(value);
+        }
+    }
 };
-//
-// class LRUCache{
-// private:
-//     int cap;
-//     std::unordered_map<std::string, Node*> cache;
-//     Node* head;
-//     Node* tail;
-
-//     void detach(Node* node){
-//         node->prev->next = node->next;
-//         node->next->prev = node->prev;
-//     }
-//     void attachAtHead(Node* node){
-//         node->next = head->next;
-//         node->prev = head;
-//         head->next->prev = node;
-//         head->next = node;
-//     }
-
-// public:
-//     LRUCache(int capacity){
-//         cap = capacity;
-//         cache.clear();
-
-//         head = new Node("","");
-//         tail = new Node("","");
-//         head->next = tail;
-//         tail->prev = head;
-//     }
-//     ~LRUCache(){
-//         Node* cur = head;
-//         while (cur){
-//             Node* nxt = cur->next;
-//             delete cur;
-//             cur = nxt;
-//         }
-//     }
-
-//     std::string get(const std::string& key){
-//         auto it = cache.find(key);
-//         if (it == cache.end()) return "-1";
-
-//         detach(it->second);
-//         attachAtHead(it->second);
-//         return it->second->value;
-//     }
-
-//     void put(const std::string& key, const std::string& value){
-//         auto it = cache.find(key);
-//         if (it != cache.end()){
-//                 it->second->value = value;
-//                 detach(it->second);
-//                 attachAtHead(it->second);
-//                 return;
-//         }
-
-//         Node* neu = new Node(key, value);
-//         cache[key] = neu;
-//         attachAtHead(neu);
-
-//         if (cache.size() > cap){
-//             Node* lru = tail->prev;
-//             detach(lru);
-//             cache.erase(lru->key);
-//             delete lru;
-//         }
-//     }
-// };
