@@ -1,14 +1,14 @@
 # Hey, Red
 
-A multithreaded, in-memory data structure store written from scratch in C++17. Built to understand how Redis works under the hood — not by reading about it, but by building one from raw TCP sockets up.
+A multithreaded, in-memory data structure store written from scratch in C++17. Built to understand how Redis works under the hood by building one from raw TCP sockets up.
 
-Hey, Red supports strings, lists, sets, and sorted sets. It speaks the RESP wire protocol, persists data to disk via an append-only file, and handles tens of thousands of concurrent operations per second across 16 lock-striped shards.
+Hey, Red supports strings, lists, sets, and sorted sets with a LRU eviction list, and a pub-sub system. It speaks the RESP wire protocol, persists data to disk via an append-only file, and handles tens of thousands of concurrent operations per second across 16 lock-striped shards, working alongside a thread-pool of 8 workers.
 
 ---
 
 ## What's Inside
 
-**Networking.** The server runs a single-threaded event loop using `select()` (the Reactor pattern). When a socket has data, the event loop hands it off to one of 8 worker threads via a shared task queue synchronized with condition variables. There is no thread-per-connection overhead.
+**Networking.** The server runs a single-threaded event loop using `select()` (the Reactor pattern). When a socket has data, the event loop hands it off to one of 8 worker threads via a shared task queue synchronized with condition variables. There is no thread-per-connection overhead. C10k: By overriding the default Winsock FD_SETSIZE, the event loop is configured to accept up to 10,000 concurrent client connections. However, because it relies on the classic select() system call rather than epoll or IOCP, performance degrades linearly O(N) as the number of connected clients scales to the upper limits.
 
 **Storage.** All data lives in memory, distributed across 16 independent shards. Each shard owns its own hash map, its own read-write lock (`std::shared_mutex`), and its own LRU eviction list. Two threads writing to different shards never block each other.
 
