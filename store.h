@@ -45,7 +45,7 @@ struct Shard{
 
 class MiniRedis{
 private:
-    int capacity;
+    size_t capacity;
 
     int num_shards;
     std::vector<Shard*> shards;
@@ -219,12 +219,14 @@ public:
                 std::deque<std::string>& cur_list = std::get<std::deque<std::string>>(it->second->value);
                 cur_list.pop_front();
 
-                mark_recently_used(shard, it->second);
-
+                
                 if (cur_list.empty()){
                     detach(it->second);
                     delete it->second;
                     shard->map.erase(it);
+                }
+                else{
+                    mark_recently_used(shard, it->second);
                 }
             }
             else if (command == "SADD"){
@@ -290,12 +292,15 @@ public:
                 while (!is_shutting_down){
                     std::this_thread::sleep_for(std::chrono::seconds(3));
                     auto now = std::chrono::steady_clock::now();
+
+                    bool key_expired = false;
     
                     for(int i = 0; i < num_shards; i++){
                         std::unique_lock<std::shared_mutex> uniqueLock(shards[i]->lock);
     
                         for(auto it = shards[i]->map.begin(); it != shards[i]->map.end(); ){
                             if (now > it->second->expiry){
+                                key_expired = true;
                                 std::string command_string = "DEL " + it->first;
     
                                 {
@@ -313,7 +318,7 @@ public:
                         }
                     }
     
-                    {
+                    if (key_expired){
                         std::lock_guard<std::mutex> lock(aof_lock);
                         aof_file.flush();
                     }
@@ -487,12 +492,14 @@ public:
         cur_list.pop_front();
 
         log_to_aof("LPOP " + key);
-        mark_recently_used(shard, it->second);
 
         if (cur_list.empty()){
             detach(it->second);
             delete it->second;
             shard->map.erase(it);
+        }
+        else{
+            mark_recently_used(shard, it->second);
         }
 
         return fr;
@@ -634,7 +641,6 @@ public:
 
     // GENERAL OPERATIONS
     void bgsave(){
-        is_rewriting = true;
         std::unordered_map<std::string, Node> snapshot;
 
         for(int i = 0; i < num_shards; i++){
@@ -644,6 +650,8 @@ public:
                 snapshot.emplace(key, *node);
             }
         }
+
+        is_rewriting = true;
 
         std::thread bgsave_thread([this, snapshot = std::move(snapshot)](){
             std::ofstream temp_aof_file("temp.aof", std::ios::trunc);

@@ -1,5 +1,0 @@
-D:/Project/Hey, Red/build/CMakeFiles/heyred-server.dir
-D:/Project/Hey, Red/build/CMakeFiles/heyred-cli.dir
-D:/Project/Hey, Red/build/CMakeFiles/heyred-benchmark.dir
-D:/Project/Hey, Red/build/CMakeFiles/edit_cache.dir
-D:/Project/Hey, Red/build/CMakeFiles/rebuild_cache.dir

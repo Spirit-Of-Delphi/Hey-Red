@@ -11,7 +11,7 @@
 std::string resp_ok() {return "+OK\r\n";}
 std::string resp_error(const std::string& msg) {return "-" + msg + "\r\n";}
 std::string resp_null() {return "$-1\r\n";}
-std::string resp_int(const int& i) {return ":" + std::to_string(i) + "\r\n";}
+std::string resp_int(size_t i) {return ":" + std::to_string(i) + "\r\n";}
 std::string resp_bulk_string(const std::string& s) {return "$" + std::to_string(s.length()) + "\r\n" + s + "\r\n";}
 std::string resp_array(const std::vector<std::string>& arr) {
     std::string res = "*" + std::to_string(arr.size()) + "\r\n";
@@ -50,31 +50,37 @@ std::string process_resp_buffer(std::string& buffer, MiniRedis& db, SOCKET clien
     }
 
     // RESP
-    size_t offset = 0;
-    
-    size_t pos = buffer.find("\r\n", offset);
-    if (pos == std::string::npos) return "";
-
-    int num_args = std::stoi(buffer.substr(1, pos-1));
-    offset = pos+2;
-
-    std::vector<std::string> args;
-    for(int i = 0; i < num_args; i++){
-        if (offset >= buffer.length() || buffer[offset] != '$') return "";
-
-        pos = buffer.find("\r\n", offset);
+    try{
+        size_t offset = 0;
+        
+        size_t pos = buffer.find("\r\n", offset);
         if (pos == std::string::npos) return "";
-
-        int str_len = std::stoi(buffer.substr(offset+1, pos-offset-1));
+    
+        int num_args = std::stoi(buffer.substr(1, pos-1));
         offset = pos+2;
-
-        if (offset+str_len+2 > buffer.length()) return "";
-
-        args.push_back(buffer.substr(offset, str_len));
-        offset += str_len+2;
+    
+        std::vector<std::string> args;
+        for(int i = 0; i < num_args; i++){
+            if (offset >= buffer.length() || buffer[offset] != '$') return "";
+    
+            pos = buffer.find("\r\n", offset);
+            if (pos == std::string::npos) return "";
+    
+            int str_len = std::stoi(buffer.substr(offset+1, pos-offset-1));
+            offset = pos+2;
+    
+            if (offset+str_len+2 > buffer.length()) return "";
+    
+            args.push_back(buffer.substr(offset, str_len));
+            offset += str_len+2;
+        }
+        buffer.erase(0, offset);
+        return process_client_cmd(args, db, client_fd);
     }
-    buffer.erase(0, offset);
-    return process_client_cmd(args, db, client_fd);
+    catch(...){
+        buffer.clear();
+        return resp_error("ERR Protocol error: invalid RESP format");
+    }
 }
 
 std::string process_client_cmd(const std::vector<std::string>& args, MiniRedis& db, SOCKET client_fd){

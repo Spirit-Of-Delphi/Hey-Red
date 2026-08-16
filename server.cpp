@@ -15,7 +15,7 @@
 bool IS_BENCHMARKING = false;
 
 #pragma comment(lib, "ws2_32.lib")
-MiniRedis db;
+MiniRedis* db = nullptr;
 
 std::queue<SOCKET> task_queue;
 std::mutex queue_mutex;
@@ -65,7 +65,7 @@ void worker_thread(){
 
             current_buffer.append(buffer, bytes_received);
             while (true){
-                std::string response = process_resp_buffer(current_buffer, db, client_fd);
+                std::string response = process_resp_buffer(current_buffer, *db, client_fd);
                 if (response.empty()) break;
 
                 if (!IS_BENCHMARKING)
@@ -88,7 +88,7 @@ void worker_thread(){
             // Client disconnected or crashed
             if (!IS_BENCHMARKING)
                 std::cout << "[INFO] Client " << client_fd << " disconnected.\n";
-            db.unsuball(client_fd);
+            db->unsuball(client_fd);
             closesocket(client_fd);
             
             std::lock_guard<std::mutex> lock(buffer_mutex);
@@ -126,6 +126,7 @@ int main(int argc, char* argv[]){
             IS_BENCHMARKING = true;
     }
 
+    db = new MiniRedis();
     SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 
     WSADATA wsaData;
@@ -198,7 +199,7 @@ int main(int argc, char* argv[]){
                 if (client_fd != INVALID_SOCKET) {
                     if (!IS_BENCHMARKING)
                         std::cout << "[INFO] New connection: " << client_fd << "\n";
-                    std::string msg = "Connected.\n";
+                    std::string msg = "+Connected\r\n";
                     send(client_fd, msg.c_str(), msg.length(), 0);
 
                     // Put the new client into the Event Loop
@@ -225,9 +226,10 @@ int main(int argc, char* argv[]){
     for(auto& t: workers){
         if (t.joinable()) t.join();
     }
-    db.shutdown();
+    db->shutdown();
 
     closesocket(server_fd);
+    delete db;
     WSACleanup();
     return 0;
 }
