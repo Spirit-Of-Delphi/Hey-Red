@@ -16,12 +16,37 @@
 #include <winsock2.h>
 #include "node.h"
 
+struct Shard{
+    std::unordered_map<std::string, Node*> map;
+    std::shared_mutex lock;
+    Node* head;
+    Node* tail;
+
+    Shard(){
+        head = new Node("","");
+        tail = new Node("","");
+        head->next = tail;
+        tail->prev = head;
+    }
+    ~Shard(){
+        Node* cur = head;
+        while (cur){
+            Node* nxt = cur->next;
+            delete cur;
+            cur = nxt;
+        }
+    }
+
+    Shard(const Shard&) = delete;
+    Shard& operator=(const Shard&) = delete;
+};
+
 class MiniRedis{
 private:
     int capacity;
-    std::unordered_map<std::string, Node*> map;
-    Node* head;
-    Node* tail;
+
+    int num_shards;
+    std::vector<Shard*> shards;
 
     std::shared_mutex pubsub_lock;
     std::unordered_map<std::string, std::unordered_set<SOCKET>> channels;
@@ -33,34 +58,39 @@ private:
     std::atomic<int> cmds_processed{0};
     std::vector<std::string> aof_rewrite_buffer;
 
-    std::shared_mutex lock;
+    std::mutex aof_lock;
     std::ofstream aof_file;
+
+    size_t get_shard_index(const std::string& key){
+        return std::hash<std::string>{}(key) % num_shards;
+    }
 
     void detach(Node* node){
         node->prev->next = node->next;
         node->next->prev = node->prev;
     }
-    void attachAtHead(Node* node){
-        node->next = head->next;
-        node->prev = head;
-        head->next->prev = node;
-        head->next = node;
+    void attach_at_head(Shard* shard, Node* node){
+        node->next = shard->head->next;
+        node->prev = shard->head;
+        shard->head->next->prev = node;
+        shard->head->next = node;
     }
 
-    void evictIfNeeded(){
-        if (map.size() > capacity){
-            Node* lru = tail->prev;
-            logToAOF("DEL " + lru->key);
+    void evict_if_needed(Shard* shard){
+        if (shard->map.size() > (capacity/num_shards)){
+            Node* lru = shard->tail->prev;
+            log_to_aof("DEL " + lru->key);
             detach(lru);
-            map.erase(lru->key);
+            shard->map.erase(lru->key);
             delete lru;
         }
     }
-    void markRecentlyUsed(Node* node){
+    void mark_recently_used(Shard* shard, Node* node){
         detach(node);
-        attachAtHead(node);
+        attach_at_head(shard, node);
     }
-    void logToAOF(const std::string& command_string){
+    void log_to_aof(const std::string& command_string){
+        std::lock_guard<std::mutex> lock(aof_lock);
         if (is_rewriting) aof_rewrite_buffer.push_back(command_string + "\n");
 
         aof_file << command_string << "\n";
@@ -70,12 +100,11 @@ private:
 public:
     MiniRedis(){
         capacity = 2000000; // magic number for now
-        map.clear();
+        num_shards = 16; // magic number for now
 
-        head = new Node("","");
-        tail = new Node("","");
-        head->next = tail;
-        tail->prev = head;
+        for(int i = 0; i < num_shards; i++){
+            shards.push_back(new Shard());
+        }
 
         std::ifstream in_file("database.aof");
         std::string line;
@@ -92,11 +121,12 @@ public:
 
             if (command == "SET"){
                 if (!(ss >> key >> value)) continue;
-                auto it = map.find(key);
-                if (it == map.end()){
+                Shard* shard = shards[get_shard_index(key)];
+                auto it = shard->map.find(key);
+                if (it == shard->map.end()){
                     Node* neu = new Node(key, value);
-                    map[key] = neu;
-                    attachAtHead(neu);
+                    shard->map[key] = neu;
+                    attach_at_head(shard, neu);
                     continue;
                 }
 
@@ -105,16 +135,17 @@ public:
                 }
 
                 it->second->value = value;
-                markRecentlyUsed(it->second);
+                mark_recently_used(shard, it->second);
             }
             else if (command == "SETEX"){
                 if (!(ss >> key >> value >> expiry_sec)) continue;
                 auto expiry = std::chrono::steady_clock::now() + std::chrono::seconds(expiry_sec);
-                auto it = map.find(key);
-                if (it == map.end()){
+                Shard* shard = shards[get_shard_index(key)];
+                auto it = shard->map.find(key);
+                if (it == shard->map.end()){
                     Node* neu = new Node(key, value, expiry);
-                    map[key] = neu;
-                    attachAtHead(neu);
+                    shard->map[key] = neu;
+                    attach_at_head(shard, neu);
                     continue;
                 }
 
@@ -124,18 +155,19 @@ public:
 
                 it->second->value = value;
                 it->second->expiry = expiry;
-                markRecentlyUsed(it->second);
+                mark_recently_used(shard, it->second);
             }
             else if (command == "LPUSH"){
                 if (!(ss >> key >> value)) continue;
-                auto it = map.find(key);
-                if (it == map.end()){
+                Shard* shard = shards[get_shard_index(key)];
+                auto it = shard->map.find(key);
+                if (it == shard->map.end()){
                     std::deque<std::string> new_list;
                     new_list.push_front(value);
 
                     Node* neu = new Node(key, new_list);
-                    map[key] = neu;
-                    attachAtHead(neu);
+                    shard->map[key] = neu;
+                    attach_at_head(shard, neu);
                     // no need for capacity overload here because that appended a DEL which will process itself
                     continue;
                 }
@@ -145,18 +177,19 @@ public:
                 }
 
                 std::get<std::deque<std::string>>(it->second->value).push_front(value);
-                markRecentlyUsed(it->second);
+                mark_recently_used(shard, it->second);
             }
             else if (command == "RPUSH"){
                 if (!(ss >> key >> value)) continue;
-                auto it = map.find(key);
-                if (it == map.end()){
+                Shard* shard = shards[get_shard_index(key)];
+                auto it = shard->map.find(key);
+                if (it == shard->map.end()){
                     std::deque<std::string> new_list;
                     new_list.push_back(value);
 
                     Node* neu = new Node(key, new_list);
-                    map[key] = neu;
-                    attachAtHead(neu);
+                    shard->map[key] = neu;
+                    attach_at_head(shard, neu);
                     continue;
                 }
 
@@ -165,12 +198,13 @@ public:
                 }
 
                 std::get<std::deque<std::string>>(it->second->value).push_back(value);
-                markRecentlyUsed(it->second);
+                mark_recently_used(shard, it->second);
             }
             else if (command == "LPOP"){
                 if (!(ss >> key)) continue;
-                auto it = map.find(key);
-                if (it == map.end()){
+                Shard* shard = shards[get_shard_index(key)];
+                auto it = shard->map.find(key);
+                if (it == shard->map.end()){
                     continue;
                 }
 
@@ -181,24 +215,25 @@ public:
                 std::deque<std::string>& cur_list = std::get<std::deque<std::string>>(it->second->value);
                 cur_list.pop_front();
 
-                markRecentlyUsed(it->second);
+                mark_recently_used(shard, it->second);
 
                 if (cur_list.empty()){
                     detach(it->second);
                     delete it->second;
-                    map.erase(it);
+                    shard->map.erase(it);
                 }
             }
             else if (command == "SADD"){
                 if (!(ss >> key >> value)) continue;
-                auto it = map.find(key);
-                if (it == map.end()){
+                Shard* shard = shards[get_shard_index(key)];
+                auto it = shard->map.find(key);
+                if (it == shard->map.end()){
                     std::unordered_set<std::string> new_set;
                     new_set.insert(value);
 
                     Node* neu = new Node(key, new_set);
-                    map[key] = neu;
-                    attachAtHead(neu);
+                    shard->map[key] = neu;
+                    attach_at_head(shard, neu);
                     continue;
                 }
 
@@ -209,18 +244,19 @@ public:
                 std::unordered_set<std::string>& cur_set = std::get<std::unordered_set<std::string>>(it->second->value);
                 cur_set.insert(value);
 
-                markRecentlyUsed(it->second);
+                mark_recently_used(shard, it->second);
             }
             else if (command == "ZADD"){
                 if (!(ss >> key >> member >> score)) continue;
-                auto it = map.find(key);
-                if (it == map.end()){
+                Shard* shard = shards[get_shard_index(key)];
+                auto it = shard->map.find(key);
+                if (it == shard->map.end()){
                     SkipList* new_skiplist = new SkipList();
                     new_skiplist->insert(score, member);
 
                     Node* neu = new Node(key, new_skiplist);
-                    map[key] = neu;
-                    attachAtHead(neu);
+                    shard->map[key] = neu;
+                    attach_at_head(shard, neu);
                     continue;
                 }
 
@@ -229,16 +265,17 @@ public:
                 }
 
                 std::get<SkipList*>(it->second->value)->insert(score, member);
-                markRecentlyUsed(it->second);
+                mark_recently_used(shard, it->second);
             }
             else if (command == "DEL"){
                 if (!(ss >> key)) continue;
-                auto it = map.find(key);
-                if (it == map.end()) continue;
+                Shard* shard = shards[get_shard_index(key)];
+                auto it = shard->map.find(key);
+                if (it == shard->map.end()) continue;
 
                 detach(it->second);
                 delete it->second;
-                map.erase(it);
+                shard->map.erase(it);
             }
         }
         in_file.close();
@@ -246,24 +283,33 @@ public:
 
         cleanup_thread = std::thread([this](){
             while (!is_shutting_down){
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                std::this_thread::sleep_for(std::chrono::seconds(3));
                 auto now = std::chrono::steady_clock::now();
 
-                {
-                    std::unique_lock<std::shared_mutex> uniqueLock(lock);
-                    for(auto it = map.begin(); it != map.end(); ){
+                for(int i = 0; i < num_shards; i++){
+                    std::unique_lock<std::shared_mutex> uniqueLock(shards[i]->lock);
+
+                    for(auto it = shards[i]->map.begin(); it != shards[i]->map.end(); ){
                         if (now > it->second->expiry){
                             std::string command_string = "DEL " + it->first;
-                            if (is_rewriting) aof_rewrite_buffer.push_back(command_string + "\n");
-                            aof_file << command_string << "\n";
+
+                            {
+                                std::lock_guard<std::mutex> lock(aof_lock);
+                                if (is_rewriting) aof_rewrite_buffer.push_back(command_string + "\n");
+                                aof_file << command_string << "\n";
+                            }
                             
                             detach(it->second);
                             delete it->second;
-                            it = map.erase(it);
+                            it = shards[i]->map.erase(it);
                         }
                         else
                             ++it;
                     }
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(aof_lock);
                     aof_file.flush();
                 }
             }
@@ -275,27 +321,25 @@ public:
         if (cleanup_thread.joinable())
             cleanup_thread.join();
 
-        Node* cur = head;
-        while (cur != nullptr){
-            Node* nxt = cur->next;
-            delete cur;
-            cur = nxt;
+        for(int i = 0; i < num_shards; i++){
+            delete shards[i];
         }
     }
 
     // STRING OPERATIONS
     void set(const std::string& key, const std::string& value){
-        std::unique_lock<std::shared_mutex> uniqueLock(lock);
+        Shard* shard = shards[get_shard_index(key)];
+        std::unique_lock<std::shared_mutex> uniqueLock(shard->lock);
 
-        auto it = map.find(key);
-        if (it == map.end()){
+        auto it = shard->map.find(key);
+        if (it == shard->map.end()){
             Node* neu = new Node(key, value);
-            map[key] = neu;
-            attachAtHead(neu);
+            shard->map[key] = neu;
+            attach_at_head(shard, neu);
 
-            logToAOF("SET " + key + " " + value);
+            log_to_aof("SET " + key + " " + value);
 
-            evictIfNeeded();
+            evict_if_needed(shard);
             return;
         }
 
@@ -304,24 +348,25 @@ public:
         }
 
         it->second->value = value;
-        markRecentlyUsed(it->second);
+        mark_recently_used(shard, it->second);
 
-        logToAOF("SET " + key + " " + value);
+        log_to_aof("SET " + key + " " + value);
     }
     void setex(const std::string& key, const std::string& value, const int& expiry_sec){
-        std::unique_lock<std::shared_mutex> uniqueLock(lock);
+        Shard* shard = shards[get_shard_index(key)];
+        std::unique_lock<std::shared_mutex> uniqueLock(shard->lock);
 
         auto expiry = std::chrono::steady_clock::now() + std::chrono::seconds(expiry_sec);
 
-        auto it = map.find(key);
-        if (it == map.end()){
+        auto it = shard->map.find(key);
+        if (it == shard->map.end()){
             Node* neu = new Node(key, value, expiry);
-            map[key] = neu;
-            attachAtHead(neu);
+            shard->map[key] = neu;
+            attach_at_head(shard, neu);
 
-            logToAOF("SETEX " + key + " " + value + " " + std::to_string(expiry_sec));
+            log_to_aof("SETEX " + key + " " + value + " " + std::to_string(expiry_sec));
 
-            evictIfNeeded();
+            evict_if_needed(shard);
             return;
         }
 
@@ -331,15 +376,16 @@ public:
 
         it->second->value = value;
         it->second->expiry = expiry;
-        markRecentlyUsed(it->second);
+        mark_recently_used(shard, it->second);
 
-        logToAOF("SETEX " + key + " " + value + " " + std::to_string(expiry_sec));
+        log_to_aof("SETEX " + key + " " + value + " " + std::to_string(expiry_sec));
     }
     std::string get(const std::string& key){
-        std::unique_lock<std::shared_mutex> uniqueLock(lock);
+        Shard* shard = shards[get_shard_index(key)];
+        std::unique_lock<std::shared_mutex> uniqueLock(shard->lock);
 
-        auto it = map.find(key);
-        if (it == map.end())
+        auto it = shard->map.find(key);
+        if (it == shard->map.end())
             throw std::out_of_range("NULL");
 
         if (!std::holds_alternative<std::string>(it->second->value)){
@@ -349,33 +395,34 @@ public:
         if (std::chrono::steady_clock::now() > it->second->expiry){
             detach(it->second);
             delete it->second;
-            map.erase(it);
+            shard->map.erase(it);
 
-            logToAOF("DEL " + key);
+            log_to_aof("DEL " + key);
             throw std::out_of_range("NULL");
         }
 
-        markRecentlyUsed(it->second);
+        mark_recently_used(shard, it->second);
 
         return std::get<std::string>(it->second->value);
     }
 
     // DEQUE/LIST OPERATIONS
     void lpush(const std::string& key, const std::string& value){
-        std::unique_lock<std::shared_mutex> unique_lock(lock);
+        Shard* shard = shards[get_shard_index(key)];
+        std::unique_lock<std::shared_mutex> unique_lock(shard->lock);
 
-        auto it = map.find(key);
-        if (it == map.end()){
+        auto it = shard->map.find(key);
+        if (it == shard->map.end()){
             std::deque<std::string> new_list;
             new_list.push_front(value);
 
             Node* neu = new Node(key, new_list);
-            map[key] = neu;
-            attachAtHead(neu);
+            shard->map[key] = neu;
+            attach_at_head(shard, neu);
 
-            logToAOF("LPUSH " + key + " " + value);
+            log_to_aof("LPUSH " + key + " " + value);
 
-            evictIfNeeded();
+            evict_if_needed(shard);
             return;
         }
 
@@ -384,25 +431,26 @@ public:
         }
 
         std::get<std::deque<std::string>>(it->second->value).push_front(value);
-        markRecentlyUsed(it->second);
+        mark_recently_used(shard, it->second);
 
-        logToAOF("LPUSH " + key + " " + value);
+        log_to_aof("LPUSH " + key + " " + value);
     }
     void rpush(const std::string& key, const std::string& value){
-        std::unique_lock<std::shared_mutex> unique_lock(lock);
+        Shard* shard = shards[get_shard_index(key)];
+        std::unique_lock<std::shared_mutex> unique_lock(shard->lock);
 
-        auto it = map.find(key);
-        if (it == map.end()){
+        auto it = shard->map.find(key);
+        if (it == shard->map.end()){
             std::deque<std::string> new_list;
             new_list.push_back(value);
 
             Node* neu = new Node(key, new_list);
-            map[key] = neu;
-            attachAtHead(neu);
+            shard->map[key] = neu;
+            attach_at_head(shard, neu);
 
-            logToAOF("RPUSH " + key + " " + value);
+            log_to_aof("RPUSH " + key + " " + value);
 
-            evictIfNeeded();
+            evict_if_needed(shard);
             return;
         }
 
@@ -411,15 +459,16 @@ public:
         }
 
         std::get<std::deque<std::string>>(it->second->value).push_back(value);
-        markRecentlyUsed(it->second);
+        mark_recently_used(shard, it->second);
 
-        logToAOF("RPUSH " + key + " " + value);
+        log_to_aof("RPUSH " + key + " " + value);
     }
     std::string lpop(const std::string& key){
-        std::unique_lock<std::shared_mutex> unique_lock(lock);
+        Shard* shard = shards[get_shard_index(key)];
+        std::unique_lock<std::shared_mutex> unique_lock(shard->lock);
 
-        auto it = map.find(key);
-        if (it == map.end()){
+        auto it = shard->map.find(key);
+        if (it == shard->map.end()){
             throw std::out_of_range("NULL");
         }
 
@@ -431,13 +480,13 @@ public:
         std::string fr = cur_list.front();
         cur_list.pop_front();
 
-        logToAOF("LPOP " + key);
-        markRecentlyUsed(it->second);
+        log_to_aof("LPOP " + key);
+        mark_recently_used(shard, it->second);
 
         if (cur_list.empty()){
             detach(it->second);
             delete it->second;
-            map.erase(it);
+            shard->map.erase(it);
         }
 
         return fr;
@@ -445,20 +494,21 @@ public:
 
     // SET OPERATIONS
     int sadd(const std::string& key, const std::string& value){
-        std::unique_lock<std::shared_mutex> unique_lock(lock);
+        Shard* shard = shards[get_shard_index(key)];
+        std::unique_lock<std::shared_mutex> unique_lock(shard->lock);
 
-        auto it = map.find(key);
-        if (it == map.end()){
+        auto it = shard->map.find(key);
+        if (it == shard->map.end()){
             std::unordered_set<std::string> new_set;
             new_set.insert(value);
 
             Node* neu = new Node(key, new_set);
-            map[key] = neu;
-            attachAtHead(neu);
+            shard->map[key] = neu;
+            attach_at_head(shard, neu);
 
-            logToAOF("SADD " + key + " " + value);
+            log_to_aof("SADD " + key + " " + value);
 
-            evictIfNeeded();
+            evict_if_needed(shard);
             return 1;
         }
 
@@ -470,16 +520,17 @@ public:
         bool duplicate = (cur_set.count(value) == 1);
         cur_set.insert(value);
 
-        markRecentlyUsed(it->second);
+        mark_recently_used(shard, it->second);
 
-        logToAOF("SADD " + key + " " + value);
+        log_to_aof("SADD " + key + " " + value);
         return (duplicate ? 0 : 1);
     }
     std::vector<std::string> smembers(const std::string& key){
-        std::unique_lock<std::shared_mutex> unique_lock(lock);
+        Shard* shard = shards[get_shard_index(key)];
+        std::unique_lock<std::shared_mutex> unique_lock(shard->lock);
 
-        auto it = map.find(key);
-        if (it == map.end()){
+        auto it = shard->map.find(key);
+        if (it == shard->map.end()){
             throw std::out_of_range("NULL");
         }
 
@@ -493,27 +544,28 @@ public:
             set_arr.push_back(*itSet);
         }
 
-        markRecentlyUsed(it->second);
+        mark_recently_used(shard, it->second);
 
         return set_arr;
     }
 
     // SKIPLIST OPERATIONS
     void zadd(const std::string& key, const std::string& member, const double& score){
-        std::unique_lock<std::shared_mutex> unique_lock(lock);
+        Shard* shard = shards[get_shard_index(key)];
+        std::unique_lock<std::shared_mutex> unique_lock(shard->lock);
 
-        auto it = map.find(key);
-        if (it == map.end()){
+        auto it = shard->map.find(key);
+        if (it == shard->map.end()){
             SkipList* new_skiplist = new SkipList();
             new_skiplist->insert(score, member);
 
             Node* neu = new Node(key, new_skiplist);
-            map[key] = neu;
-            attachAtHead(neu);
+            shard->map[key] = neu;
+            attach_at_head(shard, neu);
 
-            logToAOF("ZADD " + key + " " + member + " " + std::to_string(score));
+            log_to_aof("ZADD " + key + " " + member + " " + std::to_string(score));
 
-            evictIfNeeded();
+            evict_if_needed(shard);
             return;
         }
 
@@ -522,15 +574,16 @@ public:
         }
 
         std::get<SkipList*>(it->second->value)->insert(score, member);
-        markRecentlyUsed(it->second);
+        mark_recently_used(shard, it->second);
 
-        logToAOF("ZADD " + key + " " + member + " " + std::to_string(score));
+        log_to_aof("ZADD " + key + " " + member + " " + std::to_string(score));
     }
     std::vector<std::string> zrange(const std::string& key, int start, int stop){
-        std::unique_lock<std::shared_mutex> unique_lock(lock);
+        Shard* shard = shards[get_shard_index(key)];
+        std::unique_lock<std::shared_mutex> unique_lock(shard->lock);
 
-        auto it = map.find(key);
-        if (it == map.end()){
+        auto it = shard->map.find(key);
+        if (it == shard->map.end()){
             throw std::out_of_range("NULL");
         }
 
@@ -539,7 +592,7 @@ public:
         }
 
         auto skiplist_arr = std::get<SkipList*>(it->second->value)->zrange(start, stop);
-        markRecentlyUsed(it->second);
+        mark_recently_used(shard, it->second);
         return skiplist_arr;
     }
 
@@ -577,10 +630,11 @@ public:
     void bgsave(){
         is_rewriting = true;
         std::unordered_map<std::string, Node> snapshot;
-        {
-            std::shared_lock<std::shared_mutex> shared_lock(lock);
-        
-            for(const auto& [key, node] : map){
+
+        for(int i = 0; i < num_shards; i++){
+            std::shared_lock<std::shared_mutex> shared_lock(shards[i]->lock);
+
+            for(const auto& [key, node]: shards[i]->map){
                 snapshot.emplace(key, *node);
             }
         }
@@ -632,7 +686,7 @@ public:
             }
 
             {
-                std::unique_lock<std::shared_mutex> unique_lock(lock);
+                std::lock_guard<std::mutex> lock(aof_lock);
 
                 for(const std::string& buffer: aof_rewrite_buffer){
                     temp_aof_file << buffer;
@@ -652,46 +706,57 @@ public:
         bgsave_thread.detach();
     }
     std::vector<std::string> keys(){
-        std::shared_lock<std::shared_mutex> shared_lock(lock);
-
         std::vector<std::string> keys_arr;
-        for(auto it = map.begin(); it != map.end(); it++){
-            if (std::chrono::steady_clock::now() <= it->second->expiry){
-                keys_arr.push_back(it->first);
+
+        for(int i = 0; i < num_shards; i++){
+            std::shared_lock<std::shared_mutex> shared_lock(shards[i]->lock);
+
+            for(auto it = shards[i]->map.begin(); it != shards[i]->map.end(); it++){
+                if (std::chrono::steady_clock::now() <= it->second->expiry){
+                    keys_arr.push_back(it->first);
+                }
             }
         }
 
         return keys_arr;
     }
     std::vector<std::string> info(){
-        std::shared_lock<std::shared_mutex> shared_lock(lock);
-
         std::vector<std::string> info_arr;
 
-        std::string key_count_string = std::to_string(map.size());
+        size_t total_keys = 0;
+        for(int i = 0; i < num_shards; i++){
+            std::shared_lock<std::shared_mutex> shared_lock(shards[i]->lock);
+            total_keys += shards[i]->map.size();
+        }
+
+        std::string key_count_string = std::to_string(total_keys);
         std::string cmds_processed_string = std::to_string(cmds_processed.load());
+        std::string shards_string = std::to_string(num_shards);
 
         info_arr.push_back("Key Count: " + key_count_string);
         info_arr.push_back("Commands Processed: " + cmds_processed_string);
+        info_arr.push_back("Shards: " + shards_string);
         return info_arr;
     }
 
     void del(const std::string& key){
-        std::unique_lock<std::shared_mutex> uniqueLock(lock);
+        Shard* shard = shards[get_shard_index(key)];
+        std::unique_lock<std::shared_mutex> uniqueLock(shard->lock);
 
-        auto it = map.find(key);
-        if (it == map.end()) throw std::out_of_range("NULL");
+        auto it = shard->map.find(key);
+        if (it == shard->map.end()) throw std::out_of_range("NULL");
 
         detach(it->second);
         delete it->second;
-        map.erase(it);
-        logToAOF("DEL " + key);
+        shard->map.erase(it);
+        log_to_aof("DEL " + key);
     }
 
     void increment_cmds_processed(){
         cmds_processed++;
     }
     void shutdown(){
+        std::lock_guard<std::mutex> lock(aof_lock);
         aof_file.flush();
         aof_file.close();
     }

@@ -66,7 +66,7 @@ void worker_thread(){
                 std::string response = process_resp_buffer(current_buffer, db, client_fd);
                 if (response.empty()) break;
 
-                std::cout << "[INFO] Client " << client_fd << " command processed.\n";
+                //std::cout << "[INFO] Client " << client_fd << " command processed.\n";
                 send(client_fd, response.c_str(), response.length(), 0);
             }
 
@@ -83,7 +83,7 @@ void worker_thread(){
         }
         else{
             // Client disconnected or crashed
-            std::cout << "[INFO] Client " << client_fd << " disconnected.\n";
+            //std::cout << "[INFO] Client " << client_fd << " disconnected.\n";
             db.unsuball(client_fd);
             closesocket(client_fd);
             
