@@ -39,6 +39,37 @@ The mixed workload is the most realistic test. 40 clients spam GET while 10 clie
 
 ---
 
+## Architecture
+
+```
+                    TCP Clients
+                        |
+                   [ select() ]
+                   Event Loop
+                        |
+              +---------+---------+
+              |         |         |
+           Worker    Worker    Worker    (8 threads)
+              |         |         |
+           [ RESP Protocol Parser ]
+              |         |         |
+    +---------+---------+---------+---------+
+    |         |         |         |         |
+  Shard 0  Shard 1  Shard 2  ...  Shard 15
+    |         |         |         |         |
+  HashMap  HashMap  HashMap     HashMap
+  RW Lock  RW Lock  RW Lock     RW Lock
+  LRU List LRU List LRU List   LRU List
+              |
+         [ AOF Writer ]
+              |
+        database.aof
+```
+
+Each shard is fully independent: its own hash map, its own reader-writer lock, its own LRU doubly-linked list. The shard for a given key is determined by `std::hash<std::string>(key) % 16`.
+
+---
+
 ## Supported Commands
 
 **Strings**
@@ -108,37 +139,6 @@ Run the benchmark suite (start the server with `--benchmark` first):
 .\build\heyred-server.exe --benchmark
 .\build\heyred-benchmark.exe
 ```
-
----
-
-## Architecture
-
-```
-                    TCP Clients
-                        |
-                   [ select() ]
-                   Event Loop
-                        |
-              +---------+---------+
-              |         |         |
-           Worker    Worker    Worker    (8 threads)
-              |         |         |
-           [ RESP Protocol Parser ]
-              |         |         |
-    +---------+---------+---------+---------+
-    |         |         |         |         |
-  Shard 0  Shard 1  Shard 2  ...  Shard 15
-    |         |         |         |         |
-  HashMap  HashMap  HashMap     HashMap
-  RW Lock  RW Lock  RW Lock     RW Lock
-  LRU List LRU List LRU List   LRU List
-              |
-         [ AOF Writer ]
-              |
-        database.aof
-```
-
-Each shard is fully independent: its own hash map, its own reader-writer lock, its own LRU doubly-linked list. The shard for a given key is determined by `std::hash<std::string>(key) % 16`.
 
 ---
 
