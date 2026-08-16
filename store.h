@@ -16,6 +16,8 @@
 #include <winsock2.h>
 #include "node.h"
 
+extern bool IS_BENCHMARKING;
+
 struct Shard{
     std::unordered_map<std::string, Node*> map;
     std::shared_mutex lock;
@@ -90,6 +92,8 @@ private:
         attach_at_head(shard, node);
     }
     void log_to_aof(const std::string& command_string){
+        if (IS_BENCHMARKING) return;
+
         std::lock_guard<std::mutex> lock(aof_lock);
         if (is_rewriting) aof_rewrite_buffer.push_back(command_string + "\n");
 
@@ -281,39 +285,41 @@ public:
         in_file.close();
         aof_file.open("database.aof", std::ios::app);
 
-        cleanup_thread = std::thread([this](){
-            while (!is_shutting_down){
-                std::this_thread::sleep_for(std::chrono::seconds(3));
-                auto now = std::chrono::steady_clock::now();
-
-                for(int i = 0; i < num_shards; i++){
-                    std::unique_lock<std::shared_mutex> uniqueLock(shards[i]->lock);
-
-                    for(auto it = shards[i]->map.begin(); it != shards[i]->map.end(); ){
-                        if (now > it->second->expiry){
-                            std::string command_string = "DEL " + it->first;
-
-                            {
-                                std::lock_guard<std::mutex> lock(aof_lock);
-                                if (is_rewriting) aof_rewrite_buffer.push_back(command_string + "\n");
-                                aof_file << command_string << "\n";
+        if (!IS_BENCHMARKING){
+            cleanup_thread = std::thread([this](){
+                while (!is_shutting_down){
+                    std::this_thread::sleep_for(std::chrono::seconds(3));
+                    auto now = std::chrono::steady_clock::now();
+    
+                    for(int i = 0; i < num_shards; i++){
+                        std::unique_lock<std::shared_mutex> uniqueLock(shards[i]->lock);
+    
+                        for(auto it = shards[i]->map.begin(); it != shards[i]->map.end(); ){
+                            if (now > it->second->expiry){
+                                std::string command_string = "DEL " + it->first;
+    
+                                {
+                                    std::lock_guard<std::mutex> lock(aof_lock);
+                                    if (is_rewriting) aof_rewrite_buffer.push_back(command_string + "\n");
+                                    aof_file << command_string << "\n";
+                                }
+                                
+                                detach(it->second);
+                                delete it->second;
+                                it = shards[i]->map.erase(it);
                             }
-                            
-                            detach(it->second);
-                            delete it->second;
-                            it = shards[i]->map.erase(it);
+                            else
+                                ++it;
                         }
-                        else
-                            ++it;
+                    }
+    
+                    {
+                        std::lock_guard<std::mutex> lock(aof_lock);
+                        aof_file.flush();
                     }
                 }
-
-                {
-                    std::lock_guard<std::mutex> lock(aof_lock);
-                    aof_file.flush();
-                }
-            }
-        });
+            });
+        }
     }
     ~MiniRedis(){
         is_shutting_down = true;

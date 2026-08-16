@@ -185,7 +185,7 @@ std::string process_client_cmd(const std::vector<std::string>& args, MiniRedis& 
         }
 
         else if (command == "PING"){
-            return resp_bulk_string("Pong.");
+            return resp_bulk_string("Pong");
         }
         else if (command == "BGSAVE"){
             db.bgsave();

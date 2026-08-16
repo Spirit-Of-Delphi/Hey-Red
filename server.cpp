@@ -12,6 +12,8 @@
 #include <unordered_map>
 #include "protocol.h"
 
+bool IS_BENCHMARKING = false;
+
 #pragma comment(lib, "ws2_32.lib")
 MiniRedis db;
 
@@ -66,7 +68,8 @@ void worker_thread(){
                 std::string response = process_resp_buffer(current_buffer, db, client_fd);
                 if (response.empty()) break;
 
-                std::cout << "[INFO] Client " << client_fd << " command processed.\n";
+                if (!IS_BENCHMARKING)
+                    std::cout << "[INFO] Client " << client_fd << " command processed.\n";
                 send(client_fd, response.c_str(), response.length(), 0);
             }
 
@@ -83,7 +86,8 @@ void worker_thread(){
         }
         else{
             // Client disconnected or crashed
-            std::cout << "[INFO] Client " << client_fd << " disconnected.\n";
+            if (!IS_BENCHMARKING)
+                std::cout << "[INFO] Client " << client_fd << " disconnected.\n";
             db.unsuball(client_fd);
             closesocket(client_fd);
             
@@ -93,7 +97,35 @@ void worker_thread(){
     }
 }
 
-int main(){
+void print_startup_banner() {
+    std::cout << R"(
+  _    _                   _____          _ 
+ | |  | |                 |  __ \        | |
+ | |__| | ___ _   _       | |__) |___  __| |
+ |  __  |/ _ \ | | |      |  _  // _ \/ _` |
+ | |  | |  __/ |_| |      | | \ \  __/ (_| |
+ |_|  |_|\___|\__, |      |_|  \_\___|\__,_|
+               __/ |                        
+              |___/                         
+)" << "\n";
+    std::cout << "               Port: 8080\n";
+    std::cout << "               PID: " << GetCurrentProcessId() << "\n";
+    std::cout << "               Workers: 8\n";
+    std::cout << "               Shards: 16\n";
+    std::cout << "               Version: 1.0.0 (Windows)\n";
+    std::cout << "\n[INFO] Hey, Red Engine is ready to accept connections.\n";
+    
+    if (IS_BENCHMARKING) {
+        std::cout << "[WARNING] Server is running in BENCHMARK MODE. Disk I/O and logs are disabled.\n";
+    }
+}
+
+int main(int argc, char* argv[]){
+    for(int i = 1; i < argc; i++){
+        if (std::string(argv[i]) == "--benchmark")
+            IS_BENCHMARKING = true;
+    }
+
     SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 
     WSADATA wsaData;
@@ -134,7 +166,7 @@ int main(){
         workers.push_back(std::thread(worker_thread));
     }
 
-    std::cout << "MiniRedis Server listening on port 8080 with 8 Workers...\n";
+    print_startup_banner();
 
     FD_ZERO(&master_set);
     FD_SET(server_fd, &master_set);
@@ -164,7 +196,8 @@ int main(){
                 // New client
                 SOCKET client_fd = accept(server_fd, NULL, NULL);
                 if (client_fd != INVALID_SOCKET) {
-                    std::cout << "[INFO] New connection: " << client_fd << "\n";
+                    if (!IS_BENCHMARKING)
+                        std::cout << "[INFO] New connection: " << client_fd << "\n";
                     std::string msg = "Connected.\n";
                     send(client_fd, msg.c_str(), msg.length(), 0);
 
